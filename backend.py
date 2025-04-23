@@ -68,6 +68,10 @@ try:
         summary_index = load_index_from_storage(storage_context_summary)
 
     vector_query_engine = vector_index.as_query_engine(similarity_top_k=3)
+<<<<<<< backend/thisisthaitinh-backend
+    
+====
+>>>>>>> master
     summary_query_engine = summary_index.as_query_engine(
         response_mode="tree_summarize", use_async=True
     )
