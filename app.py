@@ -1,188 +1,244 @@
 import streamlit as st
-import os
-import logging
-import sys
-from dotenv import load_dotenv
-from llama_index.core import (
-    SimpleDirectoryReader,
-    VectorStoreIndex,
-    SummaryIndex,
-    StorageContext,
-    load_index_from_storage,
-    Settings,
-)
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.llms.gemini import Gemini
-from llama_index.embeddings.gemini import GeminiEmbedding
-from llama_index.core.tools import QueryEngineTool
-from llama_index.core.query_engine.router_query_engine import RouterQueryEngine
-from llama_index.core.selectors import LLMSingleSelector
+import requests
+import re
+from datetime import datetime
+import calendar
+import unicodedata
 
-# Cấu hình trang
-st.set_page_config(
-    page_title="Hệ thống Hỏi Đáp Tài Liệu sử dụng Gemini & LlamaIndex",
-    page_icon="📚",
-    layout="wide",
-)
+# Thiết lập tiêu đề và mô tả
+st.set_page_config(page_title="Chatbot Sức Khỏe Răng Miệng", page_icon="🦷", layout="wide")
+st.title("Chatbot Sức Khỏe Răng Miệng 🦷")
+st.markdown("""
+Hỏi về sức khỏe răng miệng, tôi sẽ trả lời dựa trên tài liệu từ CDC và WHO!  
+Tôi cũng có thể trả lời các câu hỏi đơn giản (bằng tiếng Việt hoặc tiếng Anh).  
+Ví dụ:  
+- Cụ thể: "Nguyên nhân chính của sâu răng là gì?"  
+- Tóm tắt: "Tóm tắt các bệnh răng miệng phổ biến"  
+- Đơn giản: "Hôm nay là thứ mấy?", "Bạn là ai?"  
+""")
 
-# Custom CSS
+# Custom CSS cho giao diện
 st.markdown("""
 <style>
-    .stApp {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
     .response-container {
-        background-color: #1E1E1E;
-        border-radius: 5px;
-        padding: 20px;
+        background-color: #f0f2f6;
+        border-radius: 8px;
+        padding: 15px;
         margin: 10px 0;
     }
     .source-container {
-        background-color: #2D2D2D;
+        background-color: #e6e9ef;
         border-radius: 5px;
         padding: 10px;
-        margin-top: 10px;
-    }
-    code {
-        color: #4CAF50 !important;
+        margin-top: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Tiêu đề
-st.title("Hệ thống Hỏi Đáp Tài Liệu sử dụng Gemini ")
-st.caption("Đặt câu hỏi về nội dung các file ")
-
-# Khởi tạo session state
-if 'query_engine' not in st.session_state:
-    # Load environment variables
-    load_dotenv()
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        st.error("API key của Gemini chưa được đặt. Hãy tạo file .env và thêm GEMINI_API_KEY='YOUR_API_KEY'")
-        st.stop()
-
-    # Cấu hình logging
-    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-
-    with st.spinner("Đang khởi tạo hệ thống..."):
-        # Khởi tạo mô hình
-        Settings.llm = Gemini(api_key=GEMINI_API_KEY, model_name="models/gemini-2.0-flash")
-        Settings.embed_model = GeminiEmbedding(
-            api_key=GEMINI_API_KEY, model_name="models/embedding-001"
-        )
-
-        # Load và xử lý tài liệu
-        DATA_DIR = "data"
-        try:
-            reader = SimpleDirectoryReader(input_dir=DATA_DIR, recursive=True)
-            documents = reader.load_data()
-            
-            # Phân tách tài liệu
-            node_parser = SentenceSplitter(chunk_size=1024, chunk_overlap=100)
-            nodes = node_parser.get_nodes_from_documents(documents)
-
-            # Tạo hoặc tải index
-            PERSIST_DIR_VECTOR = "./storage_vector"
-            PERSIST_DIR_SUMMARY = "./storage_summary"
-
-            # Vector Index
-            if not os.path.exists(PERSIST_DIR_VECTOR):
-                vector_index = VectorStoreIndex(nodes, show_progress=True)
-                vector_index.storage_context.persist(persist_dir=PERSIST_DIR_VECTOR)
-            else:
-                storage_context_vector = StorageContext.from_defaults(persist_dir=PERSIST_DIR_VECTOR)
-                vector_index = load_index_from_storage(storage_context_vector)
-
-            # Summary Index
-            if not os.path.exists(PERSIST_DIR_SUMMARY):
-                summary_index = SummaryIndex(nodes, show_progress=True)
-                summary_index.storage_context.persist(persist_dir=PERSIST_DIR_SUMMARY)
-            else:
-                storage_context_summary = StorageContext.from_defaults(persist_dir=PERSIST_DIR_SUMMARY)
-                summary_index = load_index_from_storage(storage_context_summary)
-
-            # Tạo query engines
-            vector_query_engine = vector_index.as_query_engine(similarity_top_k=3)
-            summary_query_engine = summary_index.as_query_engine(
-                response_mode="tree_summarize", use_async=True
-            )
-
-            # Tạo tools
-            vector_tool = QueryEngineTool.from_defaults(
-                query_engine=vector_query_engine,
-                name="vector_search_tool",
-                description="Hữu ích để tìm kiếm thông tin cụ thể từ tài liệu",
-            )
-            summary_tool = QueryEngineTool.from_defaults(
-                query_engine=summary_query_engine,
-                name="summary_tool",
-                description="Hữu ích để tóm tắt nội dung của tài liệu",
-            )
-
-            # Tạo router query engine
-            st.session_state.query_engine = RouterQueryEngine(
-                selector=LLMSingleSelector.from_defaults(llm=Settings.llm),
-                query_engine_tools=[vector_tool, summary_tool],
-                verbose=True,
-            )
-
-        except Exception as e:
-            st.error(f"Lỗi khi khởi tạo hệ thống: {str(e)}")
-            st.stop()
-
-# Chat interface
+# Khởi tạo session state để lưu lịch sử chat
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Chào bạn! Bạn muốn hỏi gì về các tài liệu?"}]
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Chào bạn! Hỏi tôi về sức khỏe răng miệng hoặc các câu hỏi đơn giản nhé!"}
+    ]
 
 # Hiển thị lịch sử chat
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.write(message["content"])
+        st.markdown(message["content"])
+        if message["role"] == "assistant" and "sources" in message:
+            with st.expander("📚 Nguồn tài liệu"):
+                for source in message["sources"]:
+                    st.markdown(f"- **File**: {source['file_name']} (Trang: {source.get('page', 'N/A')})")
+                    st.markdown(f"  **Nội dung**: {source['text']}")
 
-# Xử lý input
-if prompt := st.chat_input("Nhập câu hỏi của bạn..."):
+# Hàm chuẩn hóa chuỗi để so sánh (loại bỏ dấu tiếng Việt)
+def normalize_text(text: str) -> str:
+    """Chuẩn hóa chuỗi bằng cách loại bỏ dấu tiếng Việt và chuyển về chữ thường."""
+    text = unicodedata.normalize('NFKD', text.lower())
+    text = ''.join(c for c in text if not unicodedata.combining(c))
+    return text.strip()
+
+# Hàm kiểm tra ngôn ngữ (tiếng Việt hay không)
+def is_vietnamese(text: str) -> bool:
+    """Kiểm tra xem câu hỏi có phải tiếng Việt không dựa trên ký tự Unicode."""
+    vietnamese_chars = set('ăâđêôơư')
+    return any(char in vietnamese_chars for char in text.lower())
+
+# Hàm kiểm tra loại câu hỏi
+def is_summary_query(query: str) -> bool:
+    """Kiểm tra xem câu hỏi có yêu cầu tóm tắt không."""
+    summary_keywords = ["tóm tắt", "tong quan", "summary", "overview"]
+    return any(keyword in normalize_text(query) for keyword in summary_keywords)
+
+def is_date_query(query: str) -> bool:
+    """Kiểm tra xem câu hỏi có hỏi về ngày tháng không."""
+    date_keywords = [
+        "hom nay", "ngay bao nhieu", "thu may", "what day", "today", "date",
+        "ngay thang", "thang may", "nam nay", "ngay nao", "what is the date",
+        "ngay may", "hien tai", "bay gio", "ngay hom nay", "thoi gian"
+    ]
+    return any(keyword in normalize_text(query) for keyword in date_keywords)
+
+def is_simple_query(query: str) -> bool:
+    """Kiểm tra xem câu hỏi có phải là câu hỏi đơn giản không (ngoài ngày tháng)."""
+    simple_keywords = [
+        "ban la ai", "ban la ai", "ten ban", "ten ban", "ban lam gi", "ban lam gi",
+        "who are you", "what can you do", "ten cua ban", "ten cua ban", "ban co the",
+        "ban co the", "chao ban", "chao ban", "hello", "hi"
+    ]
+    normalized_query = normalize_text(query)
+    return any(keyword in normalized_query for keyword in simple_keywords)
+
+def is_dental_query(query: str) -> bool:
+    """Kiểm tra xem câu hỏi có liên quan đến sức khỏe răng miệng không."""
+    dental_keywords = [
+        "rang", "mieng", "sau rang", "nuou", "tooth", "dental", "oral", "plaque",
+        "fluoride", "caries", "gum", "benh rang", "oral health", "viem nuou",
+        "teeth", "gingivitis", "periodontal", "decay", "enamel", "dentist",
+        "brushing", "flossing", "mouth", "sugar", "prevention"
+    ]
+    return any(keyword in normalize_text(query) for keyword in dental_keywords)
+
+# Hàm trả lời câu hỏi về ngày tháng
+def answer_date_query(query: str, is_vietnamese: bool) -> str:
+    """Trả lời các câu hỏi về ngày tháng."""
+    today = datetime.now()
+    day = today.day
+    month = today.month
+    year = today.year
+    weekday = calendar.day_name[today.weekday()]
+    weekday_vn = {
+        "Monday": "Thứ Hai", "Tuesday": "Thứ Ba", "Wednesday": "Thứ Tư",
+        "Thursday": "Thứ Năm", "Friday": "Thứ Sáu", "Saturday": "Thứ Bảy",
+        "Sunday": "Chủ Nhật"
+    }.get(weekday, weekday)
+
+    query_lower = normalize_text(query)
+    if is_vietnamese:
+        if "thu may" in query_lower or "what day" in query_lower:
+            return f"Hôm nay là {weekday_vn}."
+        elif any(keyword in query_lower for keyword in ["ngay bao nhieu", "date", "ngay nao", "ngay may", "ngay hom nay"]):
+            return f"Hôm nay là ngày {day} tháng {month} năm {year}."
+        elif "thang may" in query_lower:
+            return f"Hôm nay là tháng {month} năm {year}."
+        elif "nam nay" in query_lower:
+            return f"Hôm nay là năm {year}."
+        else:
+            return f"Hôm nay là {weekday_vn}, ngày {day} tháng {month} năm {year}."
+    else:
+        if "thu may" in query_lower or "what day" in query_lower:
+            return f"Today is {weekday}."
+        elif any(keyword in query_lower for keyword in ["ngay bao nhieu", "date", "ngay nao", "ngay may", "ngay hom nay"]):
+            return f"Today is {day} {calendar.month_name[month]} {year}."
+        elif "thang may" in query_lower:
+            return f"It's {calendar.month_name[month]} {year}."
+        elif "nam nay" in query_lower:
+            return f"It's {year}."
+        else:
+            return f"Today is {weekday}, {day} {calendar.month_name[month]} {year}."
+
+# Hàm trả lời câu hỏi đơn giản (ngoài ngày tháng)
+def answer_simple_query(query: str, is_vietnamese: bool) -> str:
+    """Trả lời các câu hỏi đơn giản như 'Bạn là ai?'."""
+    query_lower = normalize_text(query)
+    if is_vietnamese:
+        if "ban la ai" in query_lower or "ten ban" in query_lower or "ten cua ban" in query_lower:
+            return "Tôi là Chatbot Sức Khỏe Răng Miệng, được tạo để trả lời các câu hỏi về răng miệng và các câu hỏi đơn giản!"
+        elif "ban lam gi" in query_lower or "ban co the" in query_lower:
+            return "Tôi có thể trả lời các câu hỏi về sức khỏe răng miệng dựa trên tài liệu từ CDC và WHO, hoặc các câu hỏi đơn giản như ngày tháng, giới thiệu bản thân!"
+        elif "chao ban" in query_lower or "hello" in query_lower or "hi" in query_lower:
+            return "Chào bạn! Rất vui được trò chuyện với bạn. Hỏi tôi về sức khỏe răng miệng nhé!"
+        else:
+            return "Tôi có thể giúp gì cho bạn? Hỏi về sức khỏe răng miệng hoặc các câu hỏi đơn giản nhé!"
+    else:
+        if "who are you" in query_lower or "ten ban" in query_lower or "ten cua ban" in query_lower:
+            return "I am the Oral Health Chatbot, created to answer questions about dental health and simple queries!"
+        elif "what can you do" in query_lower or "ban co the" in query_lower:
+            return "I can answer questions about oral health based on CDC and WHO documents, or simple queries like dates and introductions!"
+        elif "chao ban" in query_lower or "hello" in query_lower or "hi" in query_lower:
+            return "Hello! Nice to chat with you. Ask me about oral health!"
+        else:
+            return "How can I help you? Ask about oral health or simple questions!"
+
+# Nhập câu hỏi từ người dùng
+if prompt := st.chat_input("Hỏi về sức khỏe răng miệng hoặc câu hỏi đơn giản (ví dụ: Nguyên nhân sâu răng? Hôm nay thứ mấy? Bạn là ai?):"):
     # Thêm câu hỏi vào lịch sử
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.write(prompt)
+        st.markdown(prompt)
 
-    # Hiển thị câu trả lời
-    with st.chat_message("assistant"):
+    # Kiểm tra ngôn ngữ của câu hỏi
+    is_vn = is_vietnamese(prompt)
+
+    # Xử lý câu hỏi
+    if is_date_query(prompt):
+        # Câu hỏi về ngày tháng
+        answer = answer_date_query(prompt, is_vn)
+        with st.chat_message("assistant"):
+            st.markdown('<div class="response-container">', unsafe_allow_html=True)
+            st.markdown(f"**Câu trả lời:** {answer}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    elif is_simple_query(prompt):
+        # Câu hỏi đơn giản (ngoài ngày tháng)
+        answer = answer_simple_query(prompt, is_vn)
+        with st.chat_message("assistant"):
+            st.markdown('<div class="response-container">', unsafe_allow_html=True)
+            st.markdown(f"**Câu trả lời:** {answer}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    elif not is_dental_query(prompt):
+        # Câu hỏi không liên quan đến sức khỏe răng miệng
+        answer = "Tôi chỉ có thể trả lời các câu hỏi về sức khỏe răng miệng hoặc các câu hỏi đơn giản. Bạn có thể hỏi về chủ đề này không?" if is_vn else "I can only answer questions about oral health or simple queries. Can you ask about these topics?"
+        with st.chat_message("assistant"):
+            st.markdown('<div class="response-container">', unsafe_allow_html=True)
+            st.markdown(f"**Câu trả lời:** {answer}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    else:
+        # Câu hỏi về sức khỏe răng miệng, gọi API
+        query = prompt
+        if is_summary_query(prompt):
+            query = f"Tóm tắt: {prompt}"  # Thêm từ khóa để API trả về câu trả lời tổng quan
+
         try:
-            with st.spinner("Đang tìm câu trả lời..."):
-                response = st.session_state.query_engine.query(prompt)
-                
-                # Hiển thị câu trả lời trong container với style
+            with st.spinner("Đang xử lý câu hỏi..."):
+                response = requests.post(
+                    "http://localhost:5000/api/query",
+                    headers={"Content-Type": "application/json"},
+                    json={"query": query}
+                )
+                response.raise_for_status()  # Báo lỗi nếu không phải HTTP 200
+                result = response.json()
+
+            # Hiển thị câu trả lời
+            answer = result["answer"].strip()
+            sources = result["sources"]
+            with st.chat_message("assistant"):
                 st.markdown('<div class="response-container">', unsafe_allow_html=True)
-                st.markdown("**Question:** " + prompt)
-                st.markdown("**Answer:**")
-                st.code(response.response, language="")
-                
-                # Hiển thị metadata và source nodes
-                if hasattr(response, "metadata"):
-                    st.markdown("**Attributes:**")
-                    st.code(f"response: The response text.\nmetadata: {response.metadata}", language="python")
-                
-                if hasattr(response, "source_nodes") and response.source_nodes:
-                    st.markdown("**Source Nodes:**")
-                    for node in response.source_nodes:
-                        with st.container():
+                st.markdown(f"**Câu trả lời:** {answer}")
+                if sources:
+                    with st.expander("📚 Nguồn tài liệu"):
+                        for source in sources:
                             st.markdown('<div class="source-container">', unsafe_allow_html=True)
-                            st.code(
-                                f"file_name: {node.metadata.get('file_name', 'N/A')}\n"
-                                f"file_path: {node.metadata.get('file_path', 'N/A')}\n"
-                                f"score: {node.score:.4f}",
-                                language="python"
-                            )
-                            st.markdown("</div>", unsafe_allow_html=True)
-                
-                st.markdown("</div>", unsafe_allow_html=True)
-            
-            # Thêm câu trả lời vào lịch sử
-            st.session_state.messages.append({"role": "assistant", "content": response.response})
-        except Exception as e:
-            error_message = f"Lỗi khi xử lý câu hỏi: {str(e)}"
-            st.error(error_message)
-            st.session_state.messages.append({"role": "assistant", "content": error_message}) 
+                            st.markdown(f"- **File**: {source['file_name']} (Trang: {source.get('page', 'N/A')})")
+                            st.markdown(f"  **Nội dung**: {source['text']}")
+                            st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            # Lưu câu trả lời vào lịch sử
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources
+            })
+
+        except requests.exceptions.RequestException as e:
+            st.error(f"Lỗi khi gọi API: {e}")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "Đã xảy ra lỗi khi xử lý câu hỏi. Vui lòng thử lại!" if is_vn else "An error occurred while processing your question. Please try again!"
+            })
